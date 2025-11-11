@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
 import subprocess
+import platform
 
 # Configurar o caminho do Tesseract
 pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
@@ -138,6 +139,44 @@ class LocalizadorNotasFiscais:
             self.adicionar_debug(f"Nota encontrada no nome do arquivo: {nome_arquivo}")
             return True
         return False
+    
+    def abrir_pdf_pagina(self, caminho_pdf, numero_pagina):
+        """Abre o PDF na página específica - FUNÇÃO ADICIONADA"""
+        try:
+            sistema = platform.system()
+            
+            if sistema == "Windows":
+                # Tentar com SumatraPDF primeiro (suporta página específica)
+                try:
+                    subprocess.run(['SumatraPDF', f'-page={numero_pagina}', caminho_pdf], 
+                                 timeout=10, check=True)
+                    return True
+                except:
+                    # Fallback para visualizador padrão
+                    os.startfile(caminho_pdf)
+                    messagebox.showinfo("Abrir PDF", 
+                                      f"Arquivo: {os.path.basename(caminho_pdf)}\n"
+                                      f"Vá manualmente para a página: {numero_pagina}")
+                    return True
+                    
+            elif sistema == "Darwin":  # macOS
+                subprocess.run(['open', caminho_pdf])
+                messagebox.showinfo("Abrir PDF", 
+                                  f"Arquivo: {os.path.basename(caminho_pdf)}\n"
+                                  f"Vá manualmente para a página: {numero_pagina}")
+                return True
+                
+            elif sistema == "Linux":
+                subprocess.run(['xdg-open', caminho_pdf])
+                messagebox.showinfo("Abrir PDF", 
+                                  f"Arquivo: {os.path.basename(caminho_pdf)}\n"
+                                  f"Vá manualmente para a página: {numero_pagina}")
+                return True
+                
+        except Exception as e:
+            self.adicionar_debug(f"Erro ao abrir PDF: {e}")
+            messagebox.showerror("Erro", f"Não foi possível abrir o PDF:\n{e}")
+            return False
     
     def buscar_nota_em_pdf(self, pdf_path, numero_nota):
         """Busca o número da nota em um arquivo PDF usando múltiplas estratégias"""
@@ -305,19 +344,25 @@ class InterfaceLocalizador:
     
     def configurar_areas_texto(self):
         # Área de resultados
-        self.resultados_texto = tk.Text(self.aba_resultados, height=15, wrap=tk.WORD)
-        scrollbar_resultados = ttk.Scrollbar(self.aba_resultados, orient="vertical", command=self.resultados_texto.yview)
+        resultados_frame = ttk.Frame(self.aba_resultados)
+        resultados_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        self.resultados_texto = tk.Text(resultados_frame, height=15, wrap=tk.WORD)
+        scrollbar_resultados = ttk.Scrollbar(resultados_frame, orient="vertical", command=self.resultados_texto.yview)
         self.resultados_texto.configure(yscrollcommand=scrollbar_resultados.set)
         
-        self.resultados_texto.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+        self.resultados_texto.pack(side="left", fill="both", expand=True)
         scrollbar_resultados.pack(side="right", fill="y")
         
         # Área de debug
-        self.debug_texto = tk.Text(self.aba_debug, height=15, wrap=tk.WORD, bg='black', fg='white')
-        scrollbar_debug = ttk.Scrollbar(self.aba_debug, orient="vertical", command=self.debug_texto.yview)
+        debug_frame = ttk.Frame(self.aba_debug)
+        debug_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        self.debug_texto = tk.Text(debug_frame, height=15, wrap=tk.WORD, bg='black', fg='white')
+        scrollbar_debug = ttk.Scrollbar(debug_frame, orient="vertical", command=self.debug_texto.yview)
         self.debug_texto.configure(yscrollcommand=scrollbar_debug.set)
         
-        self.debug_texto.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+        self.debug_texto.pack(side="left", fill="both", expand=True)
         scrollbar_debug.pack(side="right", fill="y")
     
     def iniciar_busca(self):
@@ -382,12 +427,28 @@ class InterfaceLocalizador:
                 f"{i}. Arquivo: {resultado['nome_arquivo']}\n"
                 f"   Pasta: {resultado['pasta_dia']}\n"
                 f"   Página: {resultado['pagina']}\n"
-                f"   Caminho: {resultado['arquivo']}\n\n")
+                f"   Caminho: {resultado['arquivo']}\n", 'normal')
+            
+            # Botão para abrir o PDF - FUNCIONALIDADE ADICIONADA
+            self.resultados_texto.insert(tk.END, "   ")
+            self.resultados_texto.window_create(tk.END, window=ttk.Button(
+                self.resultados_texto, text="Abrir PDF", 
+                command=lambda r=resultado: self.abrir_resultado(r),
+                width=10
+            ))
+            self.resultados_texto.insert(tk.END, "\n\n")
         
         # Configurar tags para cores
         self.resultados_texto.tag_configure('erro', foreground='red')
         self.resultados_texto.tag_configure('aviso', foreground='orange')
         self.resultados_texto.tag_configure('sucesso', foreground='green')
+        self.resultados_texto.tag_configure('normal', foreground='black')
+    
+    def abrir_resultado(self, resultado):
+        """Abre o PDF na página específica - FUNÇÃO ADICIONADA"""
+        sucesso = self.localizador.abrir_pdf_pagina(resultado['arquivo'], resultado['pagina'])
+        if not sucesso:
+            messagebox.showerror("Erro", f"Não foi possível abrir o arquivo:\n{resultado['arquivo']}")
     
     def mostrar_erro(self, erro):
         self.progress.stop()
