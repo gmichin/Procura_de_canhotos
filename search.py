@@ -23,7 +23,12 @@ class LocalizadorBase:
         self.resultados = []
         self.debug_info = []
         self._stop_event = threading.Event()
+        self.callback_resultado = None  # Callback para resultados parciais
         
+    def set_callback_resultado(self, callback):
+        """Define callback para receber resultados parciais"""
+        self.callback_resultado = callback
+    
     def adicionar_debug(self, mensagem):
         """Adiciona mensagem de debug"""
         self.debug_info.append(mensagem)
@@ -104,6 +109,11 @@ class LocalizadorBase:
             self.adicionar_debug(f"Erro ao abrir PDF: {e}")
             messagebox.showerror("Erro", f"Não foi possível abrir o PDF:\n{e}")
             return False
+
+    def notificar_resultado_parcial(self, resultado):
+        """Notifica um resultado parcial via callback"""
+        if self.callback_resultado:
+            self.callback_resultado(resultado)
 
 class OCRMultiOrientacao:
     """Classe para lidar com OCR em múltiplas orientações"""
@@ -330,25 +340,41 @@ class LocalizadorNotasDevolucoes(LocalizadorBase):
         return False
     
     def processar_pdf(self, pdf_info):
-        """Processa um PDF"""
-        pdf_path, numero_nota = pdf_info
+        """Processa um PDF e notifica resultados parciais"""
+        pdf_path, numero_nota, pasta_dia, nome_arquivo = pdf_info
         
         if self._stop_event.is_set():
             return None
             
         try:
             resultados_paginas = []
-            nome_arquivo = os.path.basename(pdf_path)
             
-            # 1. Buscar no nome do arquivo
+            # 1. Buscar no nome do arquivo (mais rápido)
             if self.buscar_nome_arquivo(pdf_path, numero_nota):
                 resultados_paginas.append(1)
+                resultado = {
+                    'arquivo': pdf_path,
+                    'pagina': 1,
+                    'pasta_dia': pasta_dia,
+                    'nome_arquivo': nome_arquivo,
+                    'tipo': 'nome_arquivo'
+                }
+                self.notificar_resultado_parcial(resultado)
                 return pdf_path, resultados_paginas
             
             # 2. Busca textual direta
             paginas_texto = self.buscar_texto_direto_pdf(pdf_path, numero_nota)
             if paginas_texto:
                 resultados_paginas.extend(paginas_texto)
+                for pagina in paginas_texto:
+                    resultado = {
+                        'arquivo': pdf_path,
+                        'pagina': pagina,
+                        'pasta_dia': pasta_dia,
+                        'nome_arquivo': nome_arquivo,
+                        'tipo': 'texto_direto'
+                    }
+                    self.notificar_resultado_parcial(resultado)
                 return pdf_path, resultados_paginas
             
             # 3. OCR multi-orientação
@@ -365,6 +391,14 @@ class LocalizadorNotasDevolucoes(LocalizadorBase):
                     encontrado = self.buscar_texto_ocr_multiorientacao(imagem, numero_nota)
                     if encontrado:
                         resultados_paginas.append(num_pagina + 1)
+                        resultado = {
+                            'arquivo': pdf_path,
+                            'pagina': num_pagina + 1,
+                            'pasta_dia': pasta_dia,
+                            'nome_arquivo': nome_arquivo,
+                            'tipo': 'ocr'
+                        }
+                        self.notificar_resultado_parcial(resultado)
                         break
             
             return pdf_path, resultados_paginas if resultados_paginas else None
@@ -373,7 +407,7 @@ class LocalizadorNotasDevolucoes(LocalizadorBase):
             return pdf_path, None
     
     def buscar_nota(self, mes, dia, numero_nota, max_workers=2):
-        """Busca principal"""
+        """Busca principal com notificação de resultados parciais"""
         self.reset_search()
         self.resultados = []
         self.debug_info = []
@@ -414,9 +448,8 @@ class LocalizadorNotasDevolucoes(LocalizadorBase):
         # Processar PDFs em paralelo
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
-                executor.submit(self.processar_pdf, (pdf_path, numero_nota)): 
-                (pdf_path, pasta_dia, nome_arquivo) 
-                for pdf_path, numero_nota, pasta_dia, nome_arquivo in pdfs_para_processar
+                executor.submit(self.processar_pdf, pdf_info): pdf_info 
+                for pdf_info in pdfs_para_processar
             }
             
             for future in as_completed(futures):
@@ -424,20 +457,22 @@ class LocalizadorNotasDevolucoes(LocalizadorBase):
                     executor.shutdown(wait=False)
                     break
                     
-                pdf_path, pasta_dia, nome_arquivo = futures[future]
+                pdf_info = futures[future]
+                pdf_path, numero_nota, pasta_dia, nome_arquivo = pdf_info
                 
                 try:
                     resultado_path, paginas = future.result()
                     
                     if paginas:
                         for pagina in paginas:
-                            self.resultados.append({
+                            resultado = {
                                 'arquivo': pdf_path,
                                 'pagina': pagina,
                                 'pasta_dia': pasta_dia,
                                 'nome_arquivo': nome_arquivo
-                            })
-                            self.adicionar_debug(f"Encontrado: {nome_arquivo} página {pagina}")
+                            }
+                            if resultado not in self.resultados:
+                                self.resultados.append(resultado)
                             
                 except Exception:
                     pass
@@ -556,8 +591,8 @@ class LocalizadorNotasFiscais(LocalizadorBase):
         return False
     
     def processar_pdf_paralelo(self, pdf_info):
-        """Processa um PDF em paralelo"""
-        pdf_path, numero_nota = pdf_info
+        """Processa um PDF em paralelo e notifica resultados parciais"""
+        pdf_path, numero_nota, pasta_dia, nome_arquivo = pdf_info
         
         if self._stop_event.is_set():
             return None
@@ -568,12 +603,29 @@ class LocalizadorNotasFiscais(LocalizadorBase):
             # Estratégia 1: Buscar no nome do arquivo (mais rápido)
             if self.buscar_nome_arquivo(pdf_path, numero_nota):
                 resultados_paginas.append(1)
+                resultado = {
+                    'arquivo': pdf_path,
+                    'pagina': 1,
+                    'pasta_dia': pasta_dia,
+                    'nome_arquivo': nome_arquivo,
+                    'tipo': 'nome_arquivo'
+                }
+                self.notificar_resultado_parcial(resultado)
                 return pdf_path, resultados_paginas
             
             # Estratégia 2: Busca textual direta
             paginas_texto = self.buscar_texto_direto_pdf_otimizado(pdf_path, numero_nota)
             if paginas_texto:
                 resultados_paginas.extend(paginas_texto)
+                for pagina in paginas_texto:
+                    resultado = {
+                        'arquivo': pdf_path,
+                        'pagina': pagina,
+                        'pasta_dia': pasta_dia,
+                        'nome_arquivo': nome_arquivo,
+                        'tipo': 'texto_direto'
+                    }
+                    self.notificar_resultado_parcial(resultado)
                 return pdf_path, resultados_paginas
             
             # Estratégia 3: OCR multi-orientação
@@ -596,6 +648,14 @@ class LocalizadorNotasFiscais(LocalizadorBase):
                         encontrado = self.buscar_texto_ocr_multiorientacao(imagem, numero_nota)
                         if encontrado:
                             resultados_paginas.append(num_pagina + 1)
+                            resultado = {
+                                'arquivo': pdf_path,
+                                'pagina': num_pagina + 1,
+                                'pasta_dia': pasta_dia,
+                                'nome_arquivo': nome_arquivo,
+                                'tipo': 'ocr'
+                            }
+                            self.notificar_resultado_parcial(resultado)
                             break
             
             return pdf_path, resultados_paginas if resultados_paginas else None
@@ -605,7 +665,7 @@ class LocalizadorNotasFiscais(LocalizadorBase):
             return pdf_path, None
     
     def buscar_nota_otimizada(self, mes, dia, numero_nota, max_workers=3):
-        """Busca otimizada com processamento paralelo"""
+        """Busca otimizada com processamento paralelo e notificação de resultados parciais"""
         self.reset_search()
         self.resultados = []
         self.debug_info = []
@@ -648,9 +708,8 @@ class LocalizadorNotasFiscais(LocalizadorBase):
         # Processar PDFs em paralelo
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
-                executor.submit(self.processar_pdf_paralelo, (pdf_path, numero_nota)): 
-                (pdf_path, pasta_dia, nome_arquivo) 
-                for pdf_path, numero_nota, pasta_dia, nome_arquivo in pdfs_para_processar
+                executor.submit(self.processar_pdf_paralelo, pdf_info): pdf_info 
+                for pdf_info in pdfs_para_processar
             }
             
             for future in as_completed(futures):
@@ -658,19 +717,22 @@ class LocalizadorNotasFiscais(LocalizadorBase):
                     executor.shutdown(wait=False)
                     break
                     
-                pdf_path, pasta_dia, nome_arquivo = futures[future]
+                pdf_info = futures[future]
+                pdf_path, numero_nota, pasta_dia, nome_arquivo = pdf_info
                 
                 try:
                     resultado_path, paginas = future.result()
                     
                     if paginas:
                         for pagina in paginas:
-                            self.resultados.append({
+                            resultado = {
                                 'arquivo': pdf_path,
                                 'pagina': pagina,
                                 'pasta_dia': pasta_dia,
                                 'nome_arquivo': nome_arquivo
-                            })
+                            }
+                            if resultado not in self.resultados:
+                                self.resultados.append(resultado)
                             
                 except Exception as e:
                     self.adicionar_debug(f"Erro no processamento paralelo: {e}")
@@ -741,7 +803,7 @@ class BuscadorCanhotosAvancado(LocalizadorBase):
             self.adicionar_debug(f"Erro no OCR página {num_pagina + 1}: {e}")
             return False
     
-    def buscar_texto_no_pdf(self, caminho_pdf, numero_nota):
+    def buscar_texto_no_pdf(self, caminho_pdf, numero_nota, pasta_dia, nome_arquivo):
         """Busca o número da nota no PDF usando múltiplas estratégias"""
         try:
             paginas_encontradas = []
@@ -758,6 +820,16 @@ class BuscadorCanhotosAvancado(LocalizadorBase):
                 if numero_nota in texto:
                     paginas_encontradas.append(num_pagina + 1)
                     self.adicionar_debug(f"Busca direta: encontrado na página {num_pagina + 1}")
+                    
+                    # Notificar resultado parcial
+                    resultado = {
+                        'arquivo': caminho_pdf,
+                        'pagina': num_pagina + 1,
+                        'pasta_dia': pasta_dia,
+                        'nome_arquivo': nome_arquivo,
+                        'tipo': 'texto_direto'
+                    }
+                    self.notificar_resultado_parcial(resultado)
                     continue
                 
                 # Estratégia 2: Busca por padrões com regex
@@ -778,6 +850,16 @@ class BuscadorCanhotosAvancado(LocalizadorBase):
                         if (num_pagina + 1) not in paginas_encontradas:
                             paginas_encontradas.append(num_pagina + 1)
                             self.adicionar_debug(f"Regex '{padrao}': encontrado na página {num_pagina + 1}")
+                            
+                            # Notificar resultado parcial
+                            resultado = {
+                                'arquivo': caminho_pdf,
+                                'pagina': num_pagina + 1,
+                                'pasta_dia': pasta_dia,
+                                'nome_arquivo': nome_arquivo,
+                                'tipo': 'regex'
+                            }
+                            self.notificar_resultado_parcial(resultado)
                             break
                 
                 # Estratégia 3: OCR multi-orientação (se as anteriores não funcionaram)
@@ -786,6 +868,16 @@ class BuscadorCanhotosAvancado(LocalizadorBase):
                     if self.buscar_com_ocr_multiorientacao(caminho_pdf, numero_nota, num_pagina):
                         paginas_encontradas.append(num_pagina + 1)
                         self.adicionar_debug(f"OCR: encontrado na página {num_pagina + 1}")
+                        
+                        # Notificar resultado parcial
+                        resultado = {
+                            'arquivo': caminho_pdf,
+                            'pagina': num_pagina + 1,
+                            'pasta_dia': pasta_dia,
+                            'nome_arquivo': nome_arquivo,
+                            'tipo': 'ocr'
+                        }
+                        self.notificar_resultado_parcial(resultado)
             
             pdf_document.close()
             return paginas_encontradas
@@ -795,7 +887,7 @@ class BuscadorCanhotosAvancado(LocalizadorBase):
             return []
     
     def buscar_canhotos(self, mes, dia, numero_nota):
-        """Busca principal pelos canhotos"""
+        """Busca principal pelos canhotos com notificação de resultados parciais"""
         self.reset_search()
         self.resultados = []
         self.debug_info = []
@@ -833,42 +925,44 @@ class BuscadorCanhotosAvancado(LocalizadorBase):
                     caminho_pdf = os.path.join(pasta_info['caminho'], arquivo)
                     
                     self.adicionar_debug(f"Processando: {arquivo}")
-                    paginas = self.buscar_texto_no_pdf(caminho_pdf, numero_nota)
+                    paginas = self.buscar_texto_no_pdf(caminho_pdf, numero_nota, pasta_info['nome'], arquivo)
                     
                     if paginas:
                         for pagina in paginas:
-                            self.resultados.append({
+                            resultado = {
                                 'arquivo': caminho_pdf,
                                 'pagina': pagina,
                                 'pasta_dia': pasta_info['nome'],
                                 'nome_arquivo': arquivo,
                                 'mes': mes,
                                 'dia': dia
-                            })
+                            }
+                            if resultado not in self.resultados:
+                                self.resultados.append(resultado)
             
             self.adicionar_debug(f"Processados {pdfs_processados} PDFs na pasta {pasta_info['nome']}")
         
         self.adicionar_debug(f"Busca finalizada. {len(self.resultados)} resultado(s) encontrado(s)")
         return self.resultados
 
-# A classe InterfaceLocalizadorUnificado permanece a mesma
 class InterfaceLocalizadorUnificado:
     def __init__(self, root):
         self.root = root
-        self.root.title("Localizador Unificado de Notas Fiscais")
+        self.root.title("Localizador de Número de Nota")
         # Tamanho reduzido para caber em telas menores
         self.root.geometry("500x600")
         
         # Caminhos base para cada tipo
         self.caminhos_base = {
             "Canhoto": r"Z:\NOTAS-CANHOTOS-DEVOLUÇÕES\CANHOTOS",
-            "Devoluções": r"Z:\NOTAS-CANHOTOS-DEVOLUÇÕES\DEVOLUÇÕES", 
-            "Notas de Entrada": r"Z:\NOTAS-CANHOTOS-DEVOLUÇÕES\NOTAS ENTRADA"
+            "Devolução": r"Z:\NOTAS-CANHOTOS-DEVOLUÇÕES\DEVOLUÇÕES", 
+            "Nota de Entrada": r"Z:\NOTAS-CANHOTOS-DEVOLUÇÕES\NOTAS ENTRADA"
         }
         
         self.localizador_atual = None
         self.tipo_busca_atual = None
         self.busca_ativa = False
+        self.resultados_parciais = []
         
         self.criar_interface()
         self.carregar_meses_disponiveis()
@@ -900,19 +994,19 @@ class InterfaceLocalizadorUnificado:
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         # Título
-        titulo = ttk.Label(main_frame, text="🔍 LOCALIZADOR UNIFICADO DE NOTAS FISCAIS", 
+        titulo = ttk.Label(main_frame, text="🔍 LOCALIZADOR DE NÚMERO DE NOTA", 
                           font=('Arial', 14, 'bold'))
         titulo.grid(row=0, column=0, columnspan=3, pady=(0, 15))
         
         # Seletor de tipo de busca
-        ttk.Label(main_frame, text="Tipo de Busca:", font=('Arial', 10, 'bold')).grid(
+        ttk.Label(main_frame, text="Tipo de Documento:", font=('Arial', 10, 'bold')).grid(
             row=1, column=0, sticky=tk.W, pady=8)
         
         self.tipo_var = tk.StringVar(value="Canhoto")
         tipo_frame = ttk.Frame(main_frame)
         tipo_frame.grid(row=1, column=1, columnspan=2, sticky=(tk.W, tk.E), pady=8)
         
-        tipos = ["Canhoto", "Devoluções", "Notas de Entrada"]
+        tipos = ["Canhoto", "Devolução", "Nota de Entrada"]
         for i, tipo in enumerate(tipos):
             rb = ttk.Radiobutton(tipo_frame, text=tipo, variable=self.tipo_var, 
                                value=tipo, command=self.tipo_selecionado)
@@ -948,7 +1042,7 @@ class InterfaceLocalizadorUnificado:
         botoes_frame = ttk.Frame(main_frame)
         botoes_frame.grid(row=6, column=0, columnspan=3, pady=12)
         
-        self.buscar_btn = ttk.Button(botoes_frame, text="🔎 Iniciar Busca", 
+        self.buscar_btn = ttk.Button(botoes_frame, text="🔎 Buscar", 
                                    command=self.iniciar_busca, width=18)
         self.buscar_btn.pack(side=tk.LEFT, padx=4)
         
@@ -965,7 +1059,7 @@ class InterfaceLocalizadorUnificado:
         self.progress.grid(row=7, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=8)
         
         # Status
-        self.status_label = ttk.Label(main_frame, text="Selecione o tipo de busca e preencha os campos", 
+        self.status_label = ttk.Label(main_frame, text="Selecione o tipo de documento e preencha os campos", 
                                     font=('Arial', 8))
         self.status_label.grid(row=8, column=0, columnspan=3, pady=4)
         
@@ -1019,6 +1113,13 @@ class InterfaceLocalizadorUnificado:
         
         self.log_texto.pack(side="left", fill="both", expand=True)
         scrollbar_log.pack(side="right", fill="y")
+        
+        # Configurar tags para cores
+        self.resultados_texto.tag_configure('erro', foreground='red', font=('Arial', 9, 'bold'))
+        self.resultados_texto.tag_configure('aviso', foreground='orange', font=('Arial', 8))
+        self.resultados_texto.tag_configure('sucesso', foreground='green', font=('Arial', 10, 'bold'))
+        self.resultados_texto.tag_configure('normal', font=('Arial', 8))
+        self.resultados_texto.tag_configure('resultado_parcial', foreground='blue', font=('Arial', 9))
     
     def tipo_selecionado(self):
         """Atualiza o localizador quando o tipo de busca é alterado"""
@@ -1027,20 +1128,53 @@ class InterfaceLocalizadorUnificado:
         
         if self.tipo_busca_atual == "Canhoto":
             self.localizador_atual = BuscadorCanhotosAvancado(caminho_base)
-        elif self.tipo_busca_atual == "Devoluções":
+        elif self.tipo_busca_atual == "Devolução":
             self.localizador_atual = LocalizadorNotasDevolucoes(caminho_base)
-        elif self.tipo_busca_atual == "Notas de Entrada":
+        elif self.tipo_busca_atual == "Nota de Entrada":
             self.localizador_atual = LocalizadorNotasFiscais(caminho_base)
+        
+        # Configurar callback para resultados parciais
+        if self.localizador_atual:
+            self.localizador_atual.set_callback_resultado(self.receber_resultado_parcial)
         
         self.status_label.config(text=f"Busca configurada para: {self.tipo_busca_atual}")
         self.carregar_meses_disponiveis()
+    
+    def receber_resultado_parcial(self, resultado):
+        """Recebe resultados parciais da busca"""
+        self.root.after(0, self.mostrar_resultado_parcial, resultado)
+    
+    def mostrar_resultado_parcial(self, resultado):
+        """Mostra resultado parcial na interface"""
+        if resultado not in self.resultados_parciais:
+            self.resultados_parciais.append(resultado)
+            
+            # Adicionar ao texto de resultados
+            self.resultados_texto.insert(tk.END, 
+                f"✅ ENCONTRADO - {time.strftime('%H:%M:%S')}\n"
+                f"   Arquivo: {resultado['nome_arquivo']}\n"
+                f"   Pasta: {resultado['pasta_dia']}\n"
+                f"   Página: {resultado['pagina']}\n"
+                f"   Método: {resultado.get('tipo', 'desconhecido')}\n", 'resultado_parcial')
+            
+            # Botão para abrir o PDF
+            self.resultados_texto.insert(tk.END, "   ")
+            self.resultados_texto.window_create(tk.END, window=ttk.Button(
+                self.resultados_texto, text="Abrir PDF", 
+                command=lambda r=resultado: self.abrir_resultado(r),
+                width=10
+            ))
+            self.resultados_texto.insert(tk.END, "\n\n")
+            
+            self.resultados_texto.see(tk.END)
+            self.status_label.config(text=f"Encontrado: {resultado['nome_arquivo']}")
     
     def iniciar_busca(self):
         if self.busca_ativa:
             return
             
         if not self.localizador_atual:
-            messagebox.showerror("Erro", "Selecione um tipo de busca primeiro.")
+            messagebox.showerror("Erro", "Selecione um tipo de documento primeiro.")
             return
             
         mes = self.mes_combobox.get()
@@ -1062,6 +1196,7 @@ class InterfaceLocalizadorUnificado:
         # Limpar resultados anteriores
         self.resultados_texto.delete(1.0, tk.END)
         self.log_texto.delete(1.0, tk.END)
+        self.resultados_parciais = []
         
         self.busca_ativa = True
         self.buscar_btn.config(state='disabled')
@@ -1086,9 +1221,9 @@ class InterfaceLocalizadorUnificado:
             
             if self.tipo_busca_atual == "Canhoto":
                 resultados = self.localizador_atual.buscar_canhotos(mes, dia, nota)
-            elif self.tipo_busca_atual == "Devoluções":
+            elif self.tipo_busca_atual == "Devolução":
                 resultados = self.localizador_atual.buscar_nota(mes, dia, nota)
-            elif self.tipo_busca_atual == "Notas de Entrada":
+            elif self.tipo_busca_atual == "Nota de Entrada":
                 resultados = self.localizador_atual.buscar_nota_otimizada(mes, dia, nota)
             
             end_time = time.time()
@@ -1097,12 +1232,12 @@ class InterfaceLocalizadorUnificado:
             self.localizador_atual.adicionar_debug(f"Tempo total da busca: {tempo_decorrido:.2f} segundos")
             
             # Atualizar interface na thread principal
-            self.root.after(0, self.mostrar_resultados, resultados, mes, dia, nota, tempo_decorrido)
+            self.root.after(0, self.mostrar_resultados_finais, resultados, mes, dia, nota, tempo_decorrido)
             
         except Exception as e:
             self.root.after(0, self.mostrar_erro, str(e))
     
-    def mostrar_resultados(self, resultados, mes, dia, nota, tempo_decorrido):
+    def mostrar_resultados_finais(self, resultados, mes, dia, nota, tempo_decorrido):
         self.busca_ativa = False
         self.progress.stop()
         self.buscar_btn.config(state='normal')
@@ -1112,15 +1247,20 @@ class InterfaceLocalizadorUnificado:
         for mensagem in self.localizador_atual.debug_info:
             self.log_texto.insert(tk.END, mensagem + '\n')
         
+        # Resumo final
         self.resultados_texto.insert(tk.END, 
-            f"Busca de {self.tipo_busca_atual} concluída em {tempo_decorrido:.2f} segundos\n\n")
+            f"\n{'='*50}\n"
+            f"BUSCA CONCLUÍDA - {time.strftime('%H:%M:%S')}\n"
+            f"Tempo: {tempo_decorrido:.2f} segundos\n"
+            f"Total encontrado: {len(self.resultados_parciais)} documento(s)\n"
+            f"{'='*50}\n\n", 'sucesso')
         
         if isinstance(resultados, str):
             self.resultados_texto.insert(tk.END, f"❌ {resultados}\n\n", 'erro')
             self.status_label.config(text="Erro na busca")
             return
         
-        if not resultados:
+        if not self.resultados_parciais:
             self.resultados_texto.insert(tk.END, 
                 f"❌ Nenhum {self.tipo_busca_atual.lower()} encontrado para a nota {nota} em {dia}/{mes}\n\n", 'erro')
             self.resultados_texto.insert(tk.END,
@@ -1132,34 +1272,7 @@ class InterfaceLocalizadorUnificado:
             self.status_label.config(text="Nenhum resultado encontrado")
             return
         
-        # Mostrar resultados
-        self.resultados_texto.insert(tk.END, 
-            f"✅ Encontrado(s) {len(resultados)} {self.tipo_busca_atual.lower()}(s) para a nota {nota}:\n\n", 'sucesso')
-        
-        for i, resultado in enumerate(resultados, 1):
-            self.resultados_texto.insert(tk.END, 
-                f"📄 Resultado {i}:\n"
-                f"   Arquivo: {resultado['nome_arquivo']}\n"
-                f"   Pasta: {resultado['pasta_dia']}\n"
-                f"   Página: {resultado['pagina']}\n"
-                f"   Caminho: {resultado['arquivo']}\n", 'normal')
-            
-            # Botão para abrir o PDF
-            self.resultados_texto.insert(tk.END, "   ")
-            self.resultados_texto.window_create(tk.END, window=ttk.Button(
-                self.resultados_texto, text="Abrir PDF", 
-                command=lambda r=resultado: self.abrir_resultado(r),
-                width=10
-            ))
-            self.resultados_texto.insert(tk.END, "\n\n")
-        
-        # Configurar tags para cores
-        self.resultados_texto.tag_configure('erro', foreground='red', font=('Arial', 9, 'bold'))
-        self.resultados_texto.tag_configure('aviso', foreground='orange', font=('Arial', 8))
-        self.resultados_texto.tag_configure('sucesso', foreground='green', font=('Arial', 10, 'bold'))
-        self.resultados_texto.tag_configure('normal', font=('Arial', 8))
-        
-        self.status_label.config(text=f"Busca concluída - {len(resultados)} resultado(s) encontrado(s)")
+        self.status_label.config(text=f"Busca concluída - {len(self.resultados_parciais)} resultado(s) encontrado(s)")
     
     def abrir_resultado(self, resultado):
         """Abre o PDF na página específica"""
@@ -1182,6 +1295,7 @@ class InterfaceLocalizadorUnificado:
         self.nota_entry.delete(0, tk.END)
         self.resultados_texto.delete(1.0, tk.END)
         self.log_texto.delete(1.0, tk.END)
+        self.resultados_parciais = []
         self.status_label.config(text="Campos limpos - Pronto para buscar")
 
 def main():
