@@ -12,6 +12,7 @@ import platform
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import io
+import numpy as np
 
 # Configurar o caminho do Tesseract
 pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
@@ -104,9 +105,104 @@ class LocalizadorBase:
             messagebox.showerror("Erro", f"Não foi possível abrir o PDF:\n{e}")
             return False
 
+class OCRMultiOrientacao:
+    """Classe para lidar com OCR em múltiplas orientações"""
+    
+    @staticmethod
+    def detectar_orientacao_texto(imagem):
+        """Detecta a orientação do texto usando OCR do Tesseract"""
+        try:
+            # Configuração para detecção de orientação e script
+            osd = pytesseract.image_to_osd(imagem, config='--psm 0')
+            
+            # Extrair ângulo de rotação do resultado OSD
+            rotacao = 0
+            linhas = osd.split('\n')
+            for linha in linhas:
+                if 'Rotate:' in linha:
+                    rotacao = int(linha.split(':')[1].strip())
+                    break
+            
+            return rotacao
+        except:
+            return 0  # Se falhar, assume orientação normal
+    
+    @staticmethod
+    def rotacionar_imagem(imagem, angulo):
+        """Rotaciona a imagem pelo ângulo especificado"""
+        if angulo == 0:
+            return imagem
+        return imagem.rotate(angulo, expand=True, resample=Image.BICUBIC, fillcolor='white')
+    
+    @staticmethod
+    def tentar_todas_orientacoes(imagem, numero_nota, config_ocr):
+        """Tenta encontrar o texto em todas as orientações possíveis"""
+        orientacoes = [0, 90, 180, 270]  # Todas as orientações possíveis
+        
+        for angulo in orientacoes:
+            try:
+                # Rotacionar imagem
+                if angulo != 0:
+                    imagem_rotacionada = imagem.rotate(angulo, expand=True, 
+                                                     resample=Image.BICUBIC, 
+                                                     fillcolor='white')
+                else:
+                    imagem_rotacionada = imagem
+                
+                # Fazer OCR
+                texto = pytesseract.image_to_string(imagem_rotacionada, config=config_ocr)
+                texto_limpo = re.sub(r'\s+', '', texto)
+                
+                # Verificar se encontrou
+                if numero_nota in texto_limpo:
+                    return True, angulo
+                
+                # Verificar partes do número
+                if len(numero_nota) >= 6:
+                    partes = [
+                        numero_nota[-10:],
+                        numero_nota[-8:],  
+                        numero_nota[-6:],
+                        numero_nota[-4:],
+                    ]
+                    
+                    for parte in partes:
+                        if parte in texto_limpo:
+                            return True, angulo
+                            
+            except Exception as e:
+                continue
+        
+        return False, 0
+    
+    @staticmethod
+    def melhorar_imagem_para_ocr(imagem):
+        """Melhora a imagem para OCR em qualquer orientação"""
+        try:
+            # Converter para escala de cinza se necessário
+            if imagem.mode != 'L':
+                imagem = imagem.convert('L')
+            
+            # Aumentar contraste
+            enhancer = ImageEnhance.Contrast(imagem)
+            imagem = enhancer.enhance(2.0)
+            
+            # Aumentar nitidez
+            enhancer = ImageEnhance.Sharpness(imagem)
+            imagem = enhancer.enhance(1.5)
+            
+            # Ajustar brilho se necessário
+            enhancer = ImageEnhance.Brightness(imagem)
+            imagem = enhancer.enhance(1.1)
+            
+            return imagem
+        except Exception as e:
+            return imagem
+
 class LocalizadorNotasDevolucoes(LocalizadorBase):
     def __init__(self, caminho_base):
         super().__init__(caminho_base)
+        self.ocr_multi = OCRMultiOrientacao()
         
     def converter_pdf_para_imagem_otimizado(self, pdf_path, pagina_num):
         """Converte uma página PDF em imagem com otimizações"""
@@ -117,6 +213,7 @@ class LocalizadorNotasDevolucoes(LocalizadorBase):
             doc = fitz.open(pdf_path)
             pagina = doc.load_page(pagina_num)
             
+            # Aumentar resolução para melhor detecção de orientação
             matriz = fitz.Matrix(2.0, 2.0)
             pix = pagina.get_pixmap(matrix=matriz)
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
@@ -145,39 +242,30 @@ class LocalizadorNotasDevolucoes(LocalizadorBase):
             self.adicionar_debug(f"Erro no pré-processamento: {e}")
             return imagem
     
-    def buscar_texto_ocr_otimizado(self, imagem, numero_nota):
-        """OCR otimizado"""
+    def buscar_texto_ocr_multiorientacao(self, imagem, numero_nota):
+        """OCR otimizado para todas as orientações"""
         if self._stop_event.is_set():
             return False
             
         try:
-            imagem_processada = self.preprocessar_imagem_otimizado(imagem)
+            # Melhorar imagem para OCR
+            imagem_melhorada = self.ocr_multi.melhorar_imagem_para_ocr(imagem)
             
             config = r'--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789'
-            texto = pytesseract.image_to_string(imagem_processada, config=config)
-            texto_limpo = re.sub(r'\s+', '', texto)
             
-            # Verificar número completo
-            if numero_nota in texto_limpo:
+            # Tentar todas as orientações
+            encontrado, angulo = self.ocr_multi.tentar_todas_orientacoes(
+                imagem_melhorada, numero_nota, config
+            )
+            
+            if encontrado:
+                self.adicionar_debug(f"Texto encontrado com rotação de {angulo} graus")
                 return True
-            
-            # Verificações parciais
-            if len(numero_nota) >= 6:
-                combinacoes = [
-                    numero_nota[-10:],
-                    numero_nota[-8:],  
-                    numero_nota[-6:],
-                    numero_nota[-4:],
-                ]
-                
-                for combo in combinacoes:
-                    if combo in texto_limpo:
-                        return True
             
             return False
             
         except Exception as e:
-            self.adicionar_debug(f"Erro no OCR: {e}")
+            self.adicionar_debug(f"Erro no OCR multi-orientação: {e}")
             return False
     
     def buscar_texto_direto_pdf(self, pdf_path, numero_nota):
@@ -263,7 +351,7 @@ class LocalizadorNotasDevolucoes(LocalizadorBase):
                 resultados_paginas.extend(paginas_texto)
                 return pdf_path, resultados_paginas
             
-            # 3. OCR
+            # 3. OCR multi-orientação
             with open(pdf_path, 'rb') as arquivo:
                 leitor = PyPDF2.PdfReader(arquivo)
                 total_paginas = len(leitor.pages)
@@ -274,7 +362,7 @@ class LocalizadorNotasDevolucoes(LocalizadorBase):
                     
                 imagem = self.converter_pdf_para_imagem_otimizado(pdf_path, num_pagina)
                 if imagem:
-                    encontrado = self.buscar_texto_ocr_otimizado(imagem, numero_nota)
+                    encontrado = self.buscar_texto_ocr_multiorientacao(imagem, numero_nota)
                     if encontrado:
                         resultados_paginas.append(num_pagina + 1)
                         break
@@ -359,6 +447,7 @@ class LocalizadorNotasDevolucoes(LocalizadorBase):
 class LocalizadorNotasFiscais(LocalizadorBase):
     def __init__(self, caminho_base):
         super().__init__(caminho_base)
+        self.ocr_multi = OCRMultiOrientacao()
     
     def converter_pdf_para_imagem_otimizado(self, pdf_path, pagina_num):
         """Converte uma página PDF em imagem com otimizações"""
@@ -369,8 +458,8 @@ class LocalizadorNotasFiscais(LocalizadorBase):
             doc = fitz.open(pdf_path)
             pagina = doc.load_page(pagina_num)
             
-            # Usar resolução menor para OCR (72-100 DPI é suficiente)
-            matriz = fitz.Matrix(1.5, 1.5)
+            # Usar resolução adequada para detecção de orientação
+            matriz = fitz.Matrix(1.8, 1.8)
             pix = pagina.get_pixmap(matrix=matriz)
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
             
@@ -400,34 +489,31 @@ class LocalizadorNotasFiscais(LocalizadorBase):
             self.adicionar_debug(f"Erro no pré-processamento: {e}")
             return imagem
     
-    def buscar_texto_ocr_otimizado(self, imagem, numero_nota):
-        """OCR otimizado com configurações mais eficientes"""
+    def buscar_texto_ocr_multiorientacao(self, imagem, numero_nota):
+        """OCR otimizado para todas as orientações"""
         if self._stop_event.is_set():
             return False
             
         try:
-            imagem_processada = self.preprocessar_imagem_otimizado(imagem)
+            # Melhorar imagem primeiro
+            imagem_melhorada = self.ocr_multi.melhorar_imagem_para_ocr(imagem)
             
             # Configuração única otimizada para números
             config = r'--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789'
             
-            texto = pytesseract.image_to_string(imagem_processada, config=config)
-            texto_limpo = re.sub(r'[^\d]', '', texto)
+            # Tentar todas as orientações
+            encontrado, angulo = self.ocr_multi.tentar_todas_orientacoes(
+                imagem_melhorada, numero_nota, config
+            )
             
-            # Verificação rápida
-            if numero_nota in texto_limpo:
+            if encontrado:
+                self.adicionar_debug(f"Nota encontrada com rotação de {angulo}°")
                 return True
-            
-            # Verificação parcial apenas se necessário
-            if len(numero_nota) > 8:
-                ultimos_digitos = numero_nota[-6:]
-                if ultimos_digitos in texto_limpo:
-                    return True
             
             return False
             
         except Exception as e:
-            self.adicionar_debug(f"Erro no OCR: {e}")
+            self.adicionar_debug(f"Erro no OCR multi-orientação: {e}")
             return False
     
     def buscar_texto_direto_pdf_otimizado(self, pdf_path, numero_nota):
@@ -490,9 +576,9 @@ class LocalizadorNotasFiscais(LocalizadorBase):
                 resultados_paginas.extend(paginas_texto)
                 return pdf_path, resultados_paginas
             
-            # Estratégia 3: OCR apenas se necessário
+            # Estratégia 3: OCR multi-orientação
             if not resultados_paginas:
-                self.adicionar_debug(f"Usando OCR para: {os.path.basename(pdf_path)}")
+                self.adicionar_debug(f"Usando OCR multi-orientação para: {os.path.basename(pdf_path)}")
                 
                 with open(pdf_path, 'rb') as arquivo:
                     leitor = PyPDF2.PdfReader(arquivo)
@@ -507,7 +593,7 @@ class LocalizadorNotasFiscais(LocalizadorBase):
                         
                     imagem = self.converter_pdf_para_imagem_otimizado(pdf_path, num_pagina)
                     if imagem:
-                        encontrado = self.buscar_texto_ocr_otimizado(imagem, numero_nota)
+                        encontrado = self.buscar_texto_ocr_multiorientacao(imagem, numero_nota)
                         if encontrado:
                             resultados_paginas.append(num_pagina + 1)
                             break
@@ -596,6 +682,7 @@ class BuscadorCanhotosAvancado(LocalizadorBase):
     def __init__(self, caminho_base):
         super().__init__(caminho_base)
         self.usar_ocr = True  # Ativar OCR como fallback
+        self.ocr_multi = OCRMultiOrientacao()
     
     def melhorar_imagem_ocr(self, imagem):
         """Melhora a imagem para OCR"""
@@ -617,8 +704,8 @@ class BuscadorCanhotosAvancado(LocalizadorBase):
             self.adicionar_debug(f"Erro no pré-processamento de imagem: {e}")
             return imagem
     
-    def buscar_com_ocr(self, pdf_path, numero_nota, num_pagina):
-        """Busca o texto usando OCR"""
+    def buscar_com_ocr_multiorientacao(self, pdf_path, numero_nota, num_pagina):
+        """Busca o texto usando OCR em todas as orientações"""
         try:
             doc = fitz.open(pdf_path)
             pagina = doc.load_page(num_pagina)
@@ -637,25 +724,17 @@ class BuscadorCanhotosAvancado(LocalizadorBase):
             # Configurações do Tesseract
             config_tesseract = r'--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789'
             
-            # Fazer OCR
-            texto_ocr = pytesseract.image_to_string(imagem_melhorada, config=config_tesseract)
+            # Tentar todas as orientações
+            encontrado, angulo = self.ocr_multi.tentar_todas_orientacoes(
+                imagem_melhorada, numero_nota, config_tesseract
+            )
             
             doc.close()
             
-            # Procurar o número da nota no texto do OCR
-            if numero_nota in texto_ocr:
-                self.adicionar_debug(f"OCR encontrou '{numero_nota}' na página {num_pagina + 1}")
+            if encontrado:
+                self.adicionar_debug(f"OCR encontrou '{numero_nota}' na página {num_pagina + 1} (rotação: {angulo}°)")
                 return True
                 
-            # Buscar por partes do número (caso o OCR tenha errado alguns dígitos)
-            if len(numero_nota) > 4:
-                # Buscar últimos 4-5 dígitos
-                for i in range(4, len(numero_nota)):
-                    parte = numero_nota[-i:]
-                    if parte in texto_ocr and len(parte) >= 4:
-                        self.adicionar_debug(f"OCR encontrou parte '{parte}' na página {num_pagina + 1}")
-                        return True
-            
             return False
             
         except Exception as e:
@@ -701,10 +780,10 @@ class BuscadorCanhotosAvancado(LocalizadorBase):
                             self.adicionar_debug(f"Regex '{padrao}': encontrado na página {num_pagina + 1}")
                             break
                 
-                # Estratégia 3: OCR (se as anteriores não funcionaram)
+                # Estratégia 3: OCR multi-orientação (se as anteriores não funcionaram)
                 if not paginas_encontradas and self.usar_ocr:
-                    self.adicionar_debug(f"Tentando OCR na página {num_pagina + 1}...")
-                    if self.buscar_com_ocr(caminho_pdf, numero_nota, num_pagina):
+                    self.adicionar_debug(f"Tentando OCR multi-orientação na página {num_pagina + 1}...")
+                    if self.buscar_com_ocr_multiorientacao(caminho_pdf, numero_nota, num_pagina):
                         paginas_encontradas.append(num_pagina + 1)
                         self.adicionar_debug(f"OCR: encontrado na página {num_pagina + 1}")
             
@@ -772,11 +851,13 @@ class BuscadorCanhotosAvancado(LocalizadorBase):
         self.adicionar_debug(f"Busca finalizada. {len(self.resultados)} resultado(s) encontrado(s)")
         return self.resultados
 
+# A classe InterfaceLocalizadorUnificado permanece a mesma
 class InterfaceLocalizadorUnificado:
     def __init__(self, root):
         self.root = root
         self.root.title("Localizador Unificado de Notas Fiscais")
-        self.root.geometry("950x750")
+        # Tamanho reduzido para caber em telas menores
+        self.root.geometry("500x600")
         
         # Caminhos base para cada tipo
         self.caminhos_base = {
@@ -815,82 +896,82 @@ class InterfaceLocalizadorUnificado:
     
     def criar_interface(self):
         # Frame principal
-        main_frame = ttk.Frame(self.root, padding="15")
+        main_frame = ttk.Frame(self.root, padding="10")
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         # Título
         titulo = ttk.Label(main_frame, text="🔍 LOCALIZADOR UNIFICADO DE NOTAS FISCAIS", 
-                          font=('Arial', 16, 'bold'))
-        titulo.grid(row=0, column=0, columnspan=3, pady=(0, 20))
+                          font=('Arial', 14, 'bold'))
+        titulo.grid(row=0, column=0, columnspan=3, pady=(0, 15))
         
         # Seletor de tipo de busca
-        ttk.Label(main_frame, text="Tipo de Busca:", font=('Arial', 11, 'bold')).grid(
-            row=1, column=0, sticky=tk.W, pady=10)
+        ttk.Label(main_frame, text="Tipo de Busca:", font=('Arial', 10, 'bold')).grid(
+            row=1, column=0, sticky=tk.W, pady=8)
         
         self.tipo_var = tk.StringVar(value="Canhoto")
         tipo_frame = ttk.Frame(main_frame)
-        tipo_frame.grid(row=1, column=1, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        tipo_frame.grid(row=1, column=1, columnspan=2, sticky=(tk.W, tk.E), pady=8)
         
         tipos = ["Canhoto", "Devoluções", "Notas de Entrada"]
         for i, tipo in enumerate(tipos):
             rb = ttk.Radiobutton(tipo_frame, text=tipo, variable=self.tipo_var, 
                                value=tipo, command=self.tipo_selecionado)
-            rb.pack(side=tk.LEFT, padx=10)
+            rb.pack(side=tk.LEFT, padx=8)
         
         # Campos de entrada
-        ttk.Label(main_frame, text="Mês:", font=('Arial', 10)).grid(
-            row=2, column=0, sticky=tk.W, pady=5)
-        self.mes_combobox = ttk.Combobox(main_frame, width=20, font=('Arial', 10))
-        self.mes_combobox.grid(row=2, column=1, sticky=(tk.W, tk.E), pady=5, padx=5)
+        ttk.Label(main_frame, text="Mês:", font=('Arial', 9)).grid(
+            row=2, column=0, sticky=tk.W, pady=4)
+        self.mes_combobox = ttk.Combobox(main_frame, width=18, font=('Arial', 9))
+        self.mes_combobox.grid(row=2, column=1, sticky=(tk.W, tk.E), pady=4, padx=4)
         
-        ttk.Label(main_frame, text="Dia:", font=('Arial', 10)).grid(
-            row=3, column=0, sticky=tk.W, pady=5)
-        self.dia_combobox = ttk.Combobox(main_frame, width=10, font=('Arial', 10))
+        ttk.Label(main_frame, text="Dia:", font=('Arial', 9)).grid(
+            row=3, column=0, sticky=tk.W, pady=4)
+        self.dia_combobox = ttk.Combobox(main_frame, width=8, font=('Arial', 9))
         self.dia_combobox['values'] = [f"{i:02d}" for i in range(1, 32)]
-        self.dia_combobox.grid(row=3, column=1, sticky=(tk.W, tk.E), pady=5, padx=5)
+        self.dia_combobox.grid(row=3, column=1, sticky=tk.W, pady=4, padx=4)
         
-        ttk.Label(main_frame, text="Número da Nota:", font=('Arial', 10)).grid(
-            row=4, column=0, sticky=tk.W, pady=5)
-        self.nota_entry = ttk.Entry(main_frame, width=25, font=('Arial', 10))
-        self.nota_entry.grid(row=4, column=1, sticky=(tk.W, tk.E), pady=5, padx=5)
+        ttk.Label(main_frame, text="Número da Nota:", font=('Arial', 9)).grid(
+            row=4, column=0, sticky=tk.W, pady=4)
+        self.nota_entry = ttk.Entry(main_frame, width=20, font=('Arial', 9))
+        self.nota_entry.grid(row=4, column=1, sticky=(tk.W, tk.E), pady=4, padx=4)
         
         # Configurações
         settings_frame = ttk.Frame(main_frame)
-        settings_frame.grid(row=5, column=0, columnspan=3, pady=10)
+        settings_frame.grid(row=5, column=0, columnspan=3, pady=8)
         
         self.ocr_var = tk.BooleanVar(value=True)
         self.ocr_check = ttk.Checkbutton(settings_frame, text="Usar OCR (recomendado)", 
                                        variable=self.ocr_var)
-        self.ocr_check.pack(side=tk.LEFT, padx=10)
+        self.ocr_check.pack(side=tk.LEFT, padx=8)
         
         # Botões
         botoes_frame = ttk.Frame(main_frame)
-        botoes_frame.grid(row=6, column=0, columnspan=3, pady=15)
+        botoes_frame.grid(row=6, column=0, columnspan=3, pady=12)
         
         self.buscar_btn = ttk.Button(botoes_frame, text="🔎 Iniciar Busca", 
-                                   command=self.iniciar_busca, width=20)
-        self.buscar_btn.pack(side=tk.LEFT, padx=5)
+                                   command=self.iniciar_busca, width=18)
+        self.buscar_btn.pack(side=tk.LEFT, padx=4)
         
-        self.parar_btn = ttk.Button(botoes_frame, text="⏹️ Parar Busca", 
-                                   command=self.parar_busca, state='disabled', width=15)
-        self.parar_btn.pack(side=tk.LEFT, padx=5)
+        self.parar_btn = ttk.Button(botoes_frame, text="⏹️ Parar", 
+                                   command=self.parar_busca, state='disabled', width=12)
+        self.parar_btn.pack(side=tk.LEFT, padx=4)
         
         self.limpar_btn = ttk.Button(botoes_frame, text="🗑️ Limpar", 
-                                   command=self.limpar_campos, width=15)
-        self.limpar_btn.pack(side=tk.LEFT, padx=5)
+                                   command=self.limpar_campos, width=12)
+        self.limpar_btn.pack(side=tk.LEFT, padx=4)
         
         # Barra de progresso
         self.progress = ttk.Progressbar(main_frame, mode='indeterminate')
-        self.progress.grid(row=7, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10)
+        self.progress.grid(row=7, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=8)
         
         # Status
         self.status_label = ttk.Label(main_frame, text="Selecione o tipo de busca e preencha os campos", 
-                                    font=('Arial', 9))
-        self.status_label.grid(row=8, column=0, columnspan=3, pady=5)
+                                    font=('Arial', 8))
+        self.status_label.grid(row=8, column=0, columnspan=3, pady=4)
         
         # Abas
         notebook = ttk.Notebook(main_frame)
-        notebook.grid(row=9, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=10)
+        notebook.grid(row=9, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=8)
         
         # Aba de resultados
         self.aba_resultados = ttk.Frame(notebook)
@@ -898,7 +979,7 @@ class InterfaceLocalizadorUnificado:
         
         # Aba de log
         self.aba_log = ttk.Frame(notebook)
-        notebook.add(self.aba_log, text="📋 Log de Busca")
+        notebook.add(self.aba_log, text="📋 Log")
         
         # Configurar grid
         main_frame.columnconfigure(1, weight=1)
@@ -920,7 +1001,7 @@ class InterfaceLocalizadorUnificado:
         resultados_frame = ttk.Frame(self.aba_resultados)
         resultados_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        self.resultados_texto = tk.Text(resultados_frame, height=20, wrap=tk.WORD, font=('Arial', 10))
+        self.resultados_texto = tk.Text(resultados_frame, height=15, wrap=tk.WORD, font=('Arial', 9))
         scrollbar_resultados = ttk.Scrollbar(resultados_frame, orient="vertical", command=self.resultados_texto.yview)
         self.resultados_texto.configure(yscrollcommand=scrollbar_resultados.set)
         
@@ -931,7 +1012,7 @@ class InterfaceLocalizadorUnificado:
         log_frame = ttk.Frame(self.aba_log)
         log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        self.log_texto = tk.Text(log_frame, height=20, wrap=tk.WORD, font=('Arial', 9),
+        self.log_texto = tk.Text(log_frame, height=15, wrap=tk.WORD, font=('Arial', 8),
                                 bg='black', fg='white')
         scrollbar_log = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_texto.yview)
         self.log_texto.configure(yscrollcommand=scrollbar_log.set)
@@ -1073,10 +1154,10 @@ class InterfaceLocalizadorUnificado:
             self.resultados_texto.insert(tk.END, "\n\n")
         
         # Configurar tags para cores
-        self.resultados_texto.tag_configure('erro', foreground='red', font=('Arial', 10, 'bold'))
-        self.resultados_texto.tag_configure('aviso', foreground='orange', font=('Arial', 9))
-        self.resultados_texto.tag_configure('sucesso', foreground='green', font=('Arial', 11, 'bold'))
-        self.resultados_texto.tag_configure('normal', font=('Arial', 9))
+        self.resultados_texto.tag_configure('erro', foreground='red', font=('Arial', 9, 'bold'))
+        self.resultados_texto.tag_configure('aviso', foreground='orange', font=('Arial', 8))
+        self.resultados_texto.tag_configure('sucesso', foreground='green', font=('Arial', 10, 'bold'))
+        self.resultados_texto.tag_configure('normal', font=('Arial', 8))
         
         self.status_label.config(text=f"Busca concluída - {len(resultados)} resultado(s) encontrado(s)")
     
